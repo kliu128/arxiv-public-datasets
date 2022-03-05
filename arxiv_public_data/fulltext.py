@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import re
 import sys
 import glob
@@ -7,6 +8,7 @@ from functools import partial
 
 from multiprocessing import Pool
 from subprocess import check_call, CalledProcessError, TimeoutExpired, PIPE
+import tempfile
 
 from arxiv_public_data.config import LOGGER
 from arxiv_public_data import fixunicode, pdfstamp
@@ -54,7 +56,7 @@ def process_timeout(cmd, timeout):
 # ============================================================================
 #  functions for calling the text extraction services
 # ============================================================================
-def run_pdf2txt(pdffile: str, timelimit: int=TIMELIMIT, options: str=''):
+def run_pdf2txt(pdffile_x: str, timelimit: int = TIMELIMIT, options: str = ''):
     """
     Run pdf2txt to extract full text
 
@@ -71,20 +73,23 @@ def run_pdf2txt(pdffile: str, timelimit: int=TIMELIMIT, options: str=''):
     output : str
         Full plain text output
     """
+    pdffile = Path(pdffile_x)
     log.debug('Running {} on {}'.format(PDF2TXT, pdffile))
-    tmpfile = reextension(pdffile, 'pdf2txt')
+    with tempfile.TemporaryDirectory() as td:
+        tempdir = Path(td)
+        tmpfile = tempdir / reextension(pdffile.name, 'pdf2txt')
 
-    cmd = '{cmd} {options} -o "{output}" "{pdf}"'.format(
-        cmd=PDF2TXT, options=options, output=tmpfile, pdf=pdffile
-    )
-    cmd = shlex.split(cmd)
-    output = process_timeout(cmd, timeout=timelimit)
+        cmd = '{cmd} {options} -o "{output}" "{pdf}"'.format(
+            cmd=PDF2TXT, options=options, output=tmpfile, pdf=pdffile
+        )
+        cmd = shlex.split(cmd)
+        output = process_timeout(cmd, timeout=timelimit)
 
-    with open(tmpfile) as f:
-        return f.read()
+        with tmpfile.open() as f:
+            return f.read()
 
 
-def run_pdftotext(pdffile: str, timelimit: int = TIMELIMIT) -> str:
+def run_pdftotext(pdffile_x: str, timelimit: int = TIMELIMIT) -> str:
     """
     Run pdftotext on PDF file for extracted plain text
 
@@ -101,17 +106,20 @@ def run_pdftotext(pdffile: str, timelimit: int = TIMELIMIT) -> str:
     output : str
         Full plain text output
     """
+    pdffile = Path(pdffile_x)
     log.debug('Running {} on {}'.format(PDFTOTEXT, pdffile))
-    tmpfile = reextension(pdffile, 'pdftotxt')
+    with tempfile.TemporaryDirectory() as td:
+        tempdir = Path(td)
+        tmpfile = tempdir / reextension(pdffile.name, 'txt')
 
-    cmd = '{cmd} "{pdf}" "{output}"'.format(
-        cmd=PDFTOTEXT, pdf=pdffile, output=tmpfile
-    )
-    cmd = shlex.split(cmd)
-    output = process_timeout(cmd, timeout=timelimit)
+        cmd = '{cmd} "{pdf}" "{output}"'.format(
+            cmd=PDFTOTEXT, pdf=pdffile, output=tmpfile
+        )
+        cmd = shlex.split(cmd)
+        output = process_timeout(cmd, timeout=timelimit)
 
-    with open(tmpfile) as f:
-        return f.read()
+        with open(tmpfile) as f:
+            return f.read()
 
 
 def run_pdf2txt_A(pdffile: str, **kwargs) -> str:
@@ -197,6 +205,8 @@ def fulltext(pdffile: str, timelimit: int = TIMELIMIT):
     except OSError:
         pass
 
+    print("Converted", pdffile, "to text")
+
     return output
 
 
@@ -219,19 +229,21 @@ def sorted_files(globber: str):
 
 
     """
-    files = glob.glob(globber, recursive = True) # return a list of path, including sub directories
+    files = glob.glob(
+        globber, recursive=True)  # return a list of path, including sub directories
     files.sort()
 
     allfiles = []
 
     for fn in files:
-        nums = re.findall(r'\d+', fn) # regular expression, find number in path names
+        # regular expression, find number in path names
+        nums = re.findall(r'\d+', fn)
         data = [str(int(n)) for n in nums] + [fn]
         # a list of [first number, second number,..., filename] in string format otherwise sorted fill fail
-        allfiles.append(data) # list of list
+        allfiles.append(data)  # list of list
 
     allfiles = sorted(allfiles)
-    return [f[-1] for f in allfiles] # sorted filenames
+    return [f[-1] for f in allfiles]  # sorted filenames
 
 
 def convert_directory(path: str, timelimit: int = TIMELIMIT):
@@ -252,14 +264,17 @@ def convert_directory(path: str, timelimit: int = TIMELIMIT):
     """
     outlist = []
 
-    globber = os.path.join(path, '*.pdf')
-    pdffiles = sorted_files(globber)
+    pdf_dir = Path(path) / "0704"
+    root_dir = pdf_dir.parent
+    txt_dir = root_dir / 'fulltext'
+    txt_dir.mkdir(exists_ok=True)
 
-    log.info('Searching "{}"...'.format(globber))
-    log.info('Found: {} pdfs'.format(len(pdffiles)))
+    pdffiles = pdf_dir.glob("*.pdf")
+
+    log.info('Searching "{}"...'.format(pdf_dir))
 
     for pdffile in pdffiles:
-        txtfile = reextension(pdffile, 'txt')
+        txtfile = txt_dir / reextension(pdffile.name, 'txt')
 
         if os.path.exists(txtfile):
             continue
@@ -278,6 +293,7 @@ def convert_directory(path: str, timelimit: int = TIMELIMIT):
         outlist.append(pdffile)
     return outlist
 
+
 def convert_directory_parallel(path: str, processes: int, timelimit: int = TIMELIMIT):
     """
     Convert all pdfs in a given `path` to full plain text. For each pdf, a file
@@ -294,33 +310,40 @@ def convert_directory_parallel(path: str, processes: int, timelimit: int = TIMEL
     output : list of str
         List of converted files
     """
-    globber = os.path.join(path, '**/*.pdf') # search expression for glob.glob
-    pdffiles = sorted_files(globber)  # a list of path
 
-    log.info('Searching "{}"...'.format(globber))
-    log.info('Found: {} pdfs'.format(len(pdffiles)))
+    pdf_dir = Path(path)
+    root_dir = pdf_dir.parent
+    assert root_dir.name == "arxiv"
+    txt_dir = root_dir / 'fulltext'
+    txt_dir.mkdir(exist_ok=True)
+
+    pdffiles = list(pdf_dir.glob("**/*.pdf"))
+
+    log.info('Searching "{}"...'.format(pdf_dir))
+    log.info(f"Found {len(pdffiles)} pdf files")
 
     pool = Pool(processes=processes)
-    result = pool.map(partial(convert_safe, timelimit=timelimit), pdffiles)
+    result = pool.map(
+        partial(convert_safe, txt_dir=txt_dir, timelimit=timelimit), pdffiles)
     pool.close()
     pool.join()
 
 
-def convert_safe(pdffile: str, timelimit: int = TIMELIMIT):
+def convert_safe(pdffile: Path, txt_dir: Path, timelimit: int = TIMELIMIT):
     """ Conversion function that never fails """
     try:
-        convert(pdffile, timelimit=timelimit)
+        convert(pdffile, txt_dir, timelimit=timelimit)
     except Exception as e:
         log.error('File conversion failed for {}: {}'.format(pdffile, e))
 
 
-def convert(path: str, skipconverted=True, timelimit: int = TIMELIMIT) -> str:
+def convert(path: Path, txt_dir: Path, skipconverted=True, timelimit: int = TIMELIMIT) -> str:
     """
     Convert a single PDF to text.
 
     Parameters
     ----------
-    path : str
+    path : Path
         Location of a PDF file.
 
     skipconverted : boolean
@@ -331,15 +354,17 @@ def convert(path: str, skipconverted=True, timelimit: int = TIMELIMIT) -> str:
     str
         Location of text file.
     """
+
     if not os.path.exists(path):
         raise RuntimeError('No such path: %s' % path)
-    outpath = reextension(path, 'txt')
+
+    outpath = txt_dir / reextension(path.name, 'txt')
 
     if os.path.exists(outpath):
         return outpath
 
     try:
-        content = fulltext(path, timelimit)
+        content = fulltext(str(path), timelimit)
         with open(outpath, 'w') as f:
             f.write(content)
     except Exception as e:
